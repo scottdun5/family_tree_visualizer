@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Family Tree Map - Fast Canvas Version</title>
+    
+    <!-- Mapbox GL CSS -->
+    <link href='https://api.mapbox.com/mapbox-gl-js/v3.1.0/mapbox-gl.css' rel='stylesheet' />
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            overflow: hidden;
+        }
+        
+        #canvas-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 10;
+        }
+        
+        .map-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        
+        /* Custom scrollbar for surname list */
+        .surname-list::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .surname-list::-webkit-scrollbar-track {
+            background: #2c2c2c;
+        }
+        
+        .surname-list::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 4px;
+        }
+        
+        .surname-list::-webkit-scrollbar-thumb:hover {
+            background: #777;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Mapbox GL JS -->
+    <script src='https://api.mapbox.com/mapbox-gl-js/v3.1.0/mapbox-gl.js'></script>
+    
+    <!-- Babel Standalone for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // ⚠️ REPLACE WITH YOUR MAPBOX TOKEN FROM https://account.mapbox.com/
+        const MAPBOX_TOKEN = 
+
+        // Event type configuration
+        const EVENT_TYPES = {
+            'BIRT': { label: 'Birth', color: '#4CAF50', icon: '🎂' },
+            'DEAT': { label: 'Death', color: '#F44336', icon: '✝' },
+            'MARR': { label: 'Marriage', color: '#E91E63', icon: '💑' },
+            'ADDR': { label: 'Address', color: '#9C27B0', icon: '🏠' },
+            'Departure': { label: 'Departure', color: '#FF9800', icon: '✈️' },
+            'Arrival': { label: 'Arrival', color: '#00BCD4', icon: '🛬' },
+            'OTHER': { label: 'Other', color: '#757575', icon: '📅' }
+        };
+
+        const getEventType = (typeCode) => {
+            return EVENT_TYPES[typeCode] || EVENT_TYPES['OTHER'];
+        };
+
+        const FamilyTreeMap = () => {
+            const mapContainer = useRef(null);
+            const canvasRef = useRef(null);
+            const map = useRef(null);
+            
+            const [events, setEvents] = useState([]);
+            const [people, setPeople] = useState([]);
+            const [selectedSurnames, setSelectedSurnames] = useState([]);
+            const [selectedEventTypes, setSelectedEventTypes] = useState(Object.keys(EVENT_TYPES)); // All selected by default
+            const [uniqueSurnames, setUniqueSurnames] = useState([]);
+            const [dateRange, setDateRange] = useState({ min: new Date('1820-01-01'), max: new Date('2019-12-31') });
+            const [currentDate, setCurrentDate] = useState(new Date('2019-12-31')); // Will be updated when data loads
+            const [searchTerm, setSearchTerm] = useState('');
+            const [hoveredEvents, setHoveredEvents] = useState([]); // Changed to array to hold multiple events
+            const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+            const [displayMode, setDisplayMode] = useState('cumulative'); // 'cumulative' or 'timeline'
+            const [surnameDropdownOpen, setSurnameDropdownOpen] = useState(false);
+            const dropdownButtonRef = useRef(null);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [visibleEventCount, setVisibleEventCount] = useState(0);
+
+            // Parse date strings like "22 AUG 1904" or "DEC 1981"
+            const parseDate = (dateStr) => {
+                if (!dateStr) return null;
+                
+                const monthMap = {
+                    'JAN': 0, 'FEB': 1, 'MAR': 2, 'APR': 3, 'MAY': 4, 'JUN': 5,
+                    'JUL': 6, 'AUG': 7, 'SEP': 8, 'OCT': 9, 'NOV': 10, 'DEC': 11
+                };
+                
+                const parts = dateStr.trim().split(' ');
+                
+                if (parts.length === 3) {
+                    const day = parseInt(parts[0]);
+                    const month = monthMap[parts[1]];
+                    const year = parseInt(parts[2]);
+                    return new Date(year, month, day);
+                } else if (parts.length === 2) {
+                    const month = monthMap[parts[0]];
+                    const year = parseInt(parts[1]);
+                    return new Date(year, month, 1);
+                } else if (parts.length === 1) {
+                    const year = parseInt(parts[0]);
+                    return new Date(year, 0, 1);
+                }
+                
+                return null;
+            };
+
+            // Parse CSV with proper comma handling
+            const parseCSVLine = (line) => {
+                const result = [];
+                let current = '';
+                let inQuotes = false;
+                
+                for (let i = 0; i < line.length; i++) {
+                    const char = line[i];
+                    
+                    if (char === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (char === ',' && !inQuotes) {
+                        result.push(current.trim());
+                        current = '';
+                    } else {
+                        current += char;
+                    }
+                }
+                result.push(current.trim());
+                
+                return result;
+            };
+
+            // Load CSV data
+            useEffect(() => {
+                const loadCSV = async (filename) => {
+                    try {
+                        const response = await fetch(filename + '?v=' + Date.now());  // ADD THIS
+                        const text = await response.text();
+                        const lines = text.split('\n').filter(line => line.trim());
+                        
+                        // DEBUG: Show raw CSV data
+                        console.log(`=== RAW CSV: ${filename} ===`);
+                        console.log('First line (headers):', lines[0]);
+                        console.log('Second line (first data):', lines[1]);
+                        console.log('========================');
+                        
+                        const headers = parseCSVLine(lines[0]);
+                        
+                        // DEBUG: Show parsed headers
+                        console.log('Parsed headers:', headers);
+                        
+                        return lines.slice(1).map(line => {
+                            const values = parseCSVLine(line);
+                            const obj = {};
+                            headers.forEach((header, i) => {
+                                obj[header.trim()] = values[i] ? values[i].trim().replace(/^"|"$/g, '') : '';
+                            });
+                            return obj;
+                        });
+                    } catch (error) {
+                        console.error(`Error loading ${filename}:`, error);
+                        throw error;
+                    }
+                };
+
+                const loadData = async () => {
+                    try {
+                        setLoading(true);
+                        setError(null);
+                        
+                        console.log('Loading CSV files...');
+                        const eventsData = await loadCSV('fam_tree_events.csv');
+                        const peopleData = await loadCSV('fam_tree.csv');
+
+                        console.log(`Loaded ${eventsData.length} events and ${peopleData.length} people`);
+
+                        // Debug: Check if people have ancestor data
+                        const samplePerson = peopleData[0];
+                        console.log('Sample person from CSV:', samplePerson);
+                        console.log('People with ancestors:', peopleData.filter(p => p.Ancestors && p.Ancestors !== '[]').length);
+                        
+                        console.log(`Loaded ${eventsData.length} events and ${peopleData.length} people`);
+                        
+                        // Parse events
+                        const parsedEvents = eventsData.map(e => ({
+                            name: e.Name,
+                            surname: e.Surname,
+                            gender: e.Gender,
+                            type: e.Event_type,
+                            date: parseDate(e.Date),
+                            dateStr: e.Date,
+                            place: e.Place,
+                            lat: parseFloat(e.lat),
+                            lon: parseFloat(e.lon),
+                            person: peopleData.find(p => p.Name === e.Name && p.Surname === e.Surname)
+                        })).filter(e => e.date && !isNaN(e.lat) && !isNaN(e.lon));
+                        
+                        console.log(`Parsed ${parsedEvents.length} valid events`);
+                        
+                        if (parsedEvents.length === 0) {
+                            throw new Error('No valid events found with dates and coordinates');
+                        }
+                        
+                        // Get date range
+                        const dates = parsedEvents.map(e => e.date).filter(d => d);
+                        
+                        // Find min/max by iterating instead of spreading (avoids stack overflow)
+                        let minTimestamp = dates[0].getTime();
+                        let maxTimestamp = dates[0].getTime();
+                        
+                        for (const date of dates) {
+                            const timestamp = date.getTime();
+                            if (timestamp < minTimestamp) minTimestamp = timestamp;
+                            if (timestamp > maxTimestamp) maxTimestamp = timestamp;
+                        }
+                        
+                        const minDate = new Date(minTimestamp);
+                        const maxDate = new Date(maxTimestamp);
+                        
+                        console.log(`Date range: ${minDate.toLocaleDateString()} (${minDate.getTime()}) to ${maxDate.toLocaleDateString()} (${maxDate.getTime()})`);
+                        
+                        // Get unique surnames
+                        const surnames = [...new Set(eventsData.map(e => e.Surname))].filter(s => s).sort();
+                        
+                        setEvents(parsedEvents);
+                        setPeople(peopleData);
+                        setUniqueSurnames(surnames);
+                        setDateRange({ min: minDate, max: maxDate });
+                        setCurrentDate(maxDate);
+                        
+                        console.log('State updated - currentDate set to:', maxDate.toLocaleDateString());
+                        
+                        setLoading(false);
+                    } catch (err) {
+                        console.error('Error loading data:', err);
+                        setError(err.message);
+                        setLoading(false);
+                    }
+                };
+
+                loadData();
+            }, []);
+
+            // Initialize Mapbox
+            useEffect(() => {
+                if (loading || !mapContainer.current) return;
+                if (map.current) return;
+
+                if (MAPBOX_TOKEN === 'YOUR_MAPBOX_TOKEN_HERE') {
+                    setError('Please add your Mapbox access token in the code');
+                    return;
+                }
+
+                mapboxgl.accessToken = MAPBOX_TOKEN;
+                
+                try {
+                    map.current = new mapboxgl.Map({
+                        container: mapContainer.current,
+                        style: 'mapbox://styles/mapbox/dark-v11',
+                        center: [0, 20],
+                        zoom: 2,
+                        projection: 'mercator'
+                    });
+
+                    map.current.on('load', () => {
+                        console.log('✅ Map loaded successfully!');
+                    });
+
+                    // Note: map movement triggers are handled by useEffect instead
+                    // to ensure we always use the latest filter state
+
+                } catch (err) {
+                    console.error('Error initializing map:', err);
+                    setError('Failed to initialize map: ' + err.message);
+                }
+
+                return () => {
+                    if (map.current) {
+                        map.current.remove();
+                        map.current = null;
+                    }
+                };
+            }, [loading]);
+
+            // Draw events on canvas (like your old p5.js code!)
+            const drawCanvas = () => {
+                if (!canvasRef.current || !map.current || !currentDate) {
+                    console.log('DrawCanvas skipped:', {
+                        canvas: !!canvasRef.current,
+                        map: !!map.current,
+                        currentDate: !!currentDate,
+                        currentDateValue: currentDate
+                    });
+                    return;
+                }
+
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                
+                // Set canvas size to match its parent container
+                const rect = canvas.parentElement.getBoundingClientRect();
+                canvas.width = rect.width;
+                canvas.height = rect.height;
+                
+                // Clear canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                // Get events filtered by display mode
+                const modeFilteredEvents = getFilteredEventsByMode(events);
+                
+                // Apply other filters (event type, surname)
+                console.log('About to filter events. Total:', modeFilteredEvents.length, 'Selected surnames:', selectedSurnames);
+                if (selectedSurnames.length > 0 && modeFilteredEvents.length > 0) {
+                    const sampleEvent = modeFilteredEvents[0];
+                    console.log('Sample event:', {
+                        name: sampleEvent.name,
+                        surname: sampleEvent.surname,
+                        hasPerson: !!sampleEvent.person,
+                        ancestors: sampleEvent.person?.Ancestors
+                    });
+                }
+
+                const filteredEvents = modeFilteredEvents.filter(event => {
+                    // Event type filter
+                    const eventTypeKey = EVENT_TYPES[event.type] ? event.type : 'OTHER';
+                    if (!selectedEventTypes.includes(eventTypeKey)) return false;
+                    
+                    // Surname filter
+                    if (selectedSurnames.length > 0) {
+                        // Check if person's surname matches
+                        const surnameMatches = selectedSurnames.includes(event.surname);
+                        
+                        // Check if any ancestor surname matches
+                        let ancestorMatches = false;
+                        if (event.person && event.person.Ancestors) {
+                            try {
+                                const ancestors = JSON.parse(event.person.Ancestors.replace(/'/g, '"'));
+                                ancestorMatches = ancestors.some(a => selectedSurnames.includes(a));
+                            } catch (e) {
+                                // If parsing fails, just use surname match
+                            }
+                        }
+                        
+                        // Show event if EITHER surname OR ancestor matches
+                        if (!surnameMatches && !ancestorMatches) {
+                            return false;
+                        }
+                    }
+                    
+                    return true;
+                });
+                
+                setVisibleEventCount(filteredEvents.length);
+                
+                // Draw events
+                filteredEvents.forEach((event) => {
+                    const point = map.current.project([event.lon, event.lat]);
+                    
+                    // Only draw if point is on screen
+                    if (point.x >= -10 && point.x <= canvas.width + 10 && 
+                        point.y >= -10 && point.y <= canvas.height + 10) {
+                        
+                        // Get event type configuration
+                        const eventConfig = getEventType(event.type);
+                        
+                        // Draw circle
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+                        ctx.fillStyle = eventConfig.color;
+                        ctx.fill();
+                        ctx.strokeStyle = 'white';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                });
+            };
+
+            // Redraw when filters change
+            useEffect(() => {
+                console.log('Redraw useEffect triggered:', {
+                    eventsCount: events.length,
+                    currentDate: currentDate,
+                    selectedSurnamesCount: selectedSurnames.length,
+                    selectedEventTypesCount: selectedEventTypes.length,
+                    displayMode: displayMode
+                });
+                
+                if (map.current && currentDate && events.length > 0) {
+                    // Call drawCanvas after a short delay to ensure map is ready
+                    setTimeout(() => {
+                        drawCanvas();
+                    }, 100);
+                }
+            }, [events, currentDate, selectedSurnames, selectedEventTypes, displayMode]);
+
+            // Handle map movements - redraw when map moves or zooms
+            useEffect(() => {
+                if (!map.current) return;
+
+                const handleMapMove = () => {
+                    drawCanvas();
+                };
+
+                map.current.on('move', handleMapMove);
+                map.current.on('moveend', handleMapMove);
+                map.current.on('zoom', handleMapMove);
+                map.current.on('zoomend', handleMapMove);
+
+                return () => {
+                    if (map.current) {
+                        map.current.off('move', handleMapMove);
+                        map.current.off('moveend', handleMapMove);
+                        map.current.off('zoom', handleMapMove);
+                        map.current.off('zoomend', handleMapMove);
+                    }
+                };
+            }, [events, currentDate, selectedSurnames, selectedEventTypes, displayMode]); // Re-attach listeners when filters change
+
+            // Close surname dropdown when clicking outside
+            useEffect(() => {
+                const handleClickOutside = (e) => {
+                    if (surnameDropdownOpen && !e.target.closest('.surname-dropdown-container')) {
+                        setSurnameDropdownOpen(false);
+                    }
+                };
+
+                document.addEventListener('mousedown', handleClickOutside);
+                return () => {
+                    document.removeEventListener('mousedown', handleClickOutside);
+                };
+            }, [surnameDropdownOpen]);
+
+            // Handle mouse hover to show event details
+            const handleMouseMove = (e) => {
+                if (!map.current || !currentDate) return;
+
+                const rect = canvasRef.current.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                // Get events filtered by display mode
+                const modeFilteredEvents = getFilteredEventsByMode(events);
+
+                // Find ALL events under mouse (within 6px radius)
+                const filteredEvents = modeFilteredEvents.filter(event => {
+                    // Event type filter
+                    const eventTypeKey = EVENT_TYPES[event.type] ? event.type : 'OTHER';
+                    if (!selectedEventTypes.includes(eventTypeKey)) return false;
+                    
+                    // Surname filter
+                    if (selectedSurnames.length > 0) {
+                        // Check if person's surname matches
+                        const surnameMatches = selectedSurnames.includes(event.surname);
+                        
+                        // Check if any ancestor surname matches
+                        let ancestorMatches = false;
+                        if (event.person && event.person.Ancestors) {
+                            try {
+                                const ancestors = JSON.parse(event.person.Ancestors.replace(/'/g, '"'));
+                                ancestorMatches = ancestors.some(a => selectedSurnames.includes(a));
+                            } catch (e) {
+                                // If parsing fails, just use surname match
+                            }
+                        }
+                        
+                        // Show event if EITHER surname OR ancestor matches
+                        if (!surnameMatches && !ancestorMatches) {
+                            return false;
+                        }
+                    }
+                    
+                    return true;
+                });
+
+                const foundEvents = [];
+                for (const event of filteredEvents) {
+                    const point = map.current.project([event.lon, event.lat]);
+                    const dist = Math.sqrt((point.x - x) ** 2 + (point.y - y) ** 2);
+                    
+                    if (dist < 6) {
+                        foundEvents.push(event);
+                    }
+                }
+
+                setHoveredEvents(foundEvents);
+                setMousePos({ x: e.clientX, y: e.clientY });
+            };
+
+            const toggleSurname = (surname) => {
+                setSelectedSurnames(prev => 
+                    prev.includes(surname) 
+                        ? prev.filter(s => s !== surname)
+                        : [...prev, surname]
+                );
+            };
+
+            // Filter events based on display mode
+            const getFilteredEventsByMode = (allEvents) => {
+                if (displayMode === 'cumulative') {
+                    // Show all events up to current date
+                    return allEvents.filter(event => event.date <= currentDate);
+                } else {
+                    // Timeline mode: show only most recent event per person
+                    const peopleMap = {};
+                    
+                    // Group events by person
+                    allEvents.forEach(event => {
+                        if (event.date > currentDate) return;
+                        
+                        const personKey = `${event.name}|${event.surname}`;
+                        if (!peopleMap[personKey]) {
+                            peopleMap[personKey] = {
+                                events: [],
+                                birthDate: null
+                            };
+                        }
+                        
+                        peopleMap[personKey].events.push(event);
+                        
+                        // Track birth date
+                        if (event.type === 'BIRT') {
+                            peopleMap[personKey].birthDate = event.date;
+                        }
+                    });
+                    
+                    // For each person, get their most recent event
+                    const timelineEvents = [];
+                    Object.values(peopleMap).forEach(personData => {
+                        if (personData.events.length === 0) return;
+                        
+                        // Sort by date descending to get most recent
+                        const sortedEvents = personData.events.sort((a, b) => b.date - a.date);
+                        const mostRecentEvent = sortedEvents[0];
+                        
+                        // Calculate years since most recent event
+                        const daysSinceMostRecent = (currentDate - mostRecentEvent.date) / (1000 * 60 * 60 * 24);
+                        const yearsSinceMostRecent = daysSinceMostRecent / 365.25;
+                        
+                        // Filter out events > 80 years old (regardless of type)
+                        if (yearsSinceMostRecent > 80) {
+                            return;
+                        }
+                        
+                        // If most recent event is death, only show if within 5 years
+                        if (mostRecentEvent.type === 'DEAT') {
+                            if (yearsSinceMostRecent <= 5) {
+                                timelineEvents.push(mostRecentEvent);
+                            }
+                            return;
+                        }
+                        
+                        // If not death, check if person is likely deceased (90+ years since birth)
+                        if (personData.birthDate) {
+                            const yearsSinceBirth = (currentDate - personData.birthDate) / (1000 * 60 * 60 * 24 * 365.25);
+                            if (yearsSinceBirth >= 90) {
+                                // Likely deceased, don't show
+                                return;
+                            }
+                        }
+                        
+                        // Show the most recent event
+                        timelineEvents.push(mostRecentEvent);
+                    });
+                    
+                    return timelineEvents;
+                }
+            };
+
+            const filteredSurnames = uniqueSurnames.filter(surname => 
+                surname.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+
+            if (error) {
+                return (
+                    <div style={{
+                        width: '100vw',
+                        height: '100vh',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: '#1a1a1a',
+                        color: '#ff4444',
+                        fontSize: '18px',
+                        padding: '20px',
+                        textAlign: 'center'
+                    }}>
+                        <div>
+                            <div style={{ fontSize: '48px', marginBottom: '20px' }}>⚠️</div>
+                            <div style={{ fontWeight: 'bold', marginBottom: '10px' }}>Error Loading Family Tree</div>
+                            <div style={{ color: '#aaa' }}>{error}</div>
+                            <div style={{ marginTop: '20px', fontSize: '14px', color: '#888' }}>
+                                Make sure:<br/>
+                                1. Your CSV files are in the same directory<br/>
+                                2. You've added your Mapbox token<br/>
+                                3. You're running through a local server
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (loading) {
+                return (
+                    <div style={{
+                        width: '100vw',
+                        height: '100vh',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: '#1a1a1a',
+                        color: 'white',
+                        fontSize: '18px'
+                    }}>
+                        <div>
+                            <div style={{ fontSize: '48px', marginBottom: '20px' }}>⏳</div>
+                            <div>Loading family tree data...</div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
+                    <div 
+                        style={{ 
+                            flex: 1, 
+                            position: 'relative',
+                            minHeight: '400px',
+                            backgroundColor: '#1a1a1a',
+                            overflow: 'hidden'
+                        }}
+                        onMouseMove={handleMouseMove}
+                        onMouseLeave={() => setHoveredEvents([])}
+                    >
+                        {/* Map container */}
+                        <div 
+                            ref={mapContainer} 
+                            className="map-container"
+                            style={{ 
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                right: 0,
+                                bottom: 0
+                            }}
+                        />
+                        
+                        {/* Canvas overlay for drawing events */}
+                        <canvas 
+                            ref={canvasRef} 
+                            id="canvas-overlay"
+                            style={{ 
+                                position: 'absolute',
+                                top: 0,
+                                left: 0,
+                                pointerEvents: 'none',
+                                zIndex: 10
+                            }}
+                        />
+                        
+                        {/* Hover Tooltip */}
+                        {hoveredEvents.length > 0 && (
+                            <div style={{
+                                position: 'fixed',
+                                left: mousePos.x + 10,
+                                top: mousePos.y + 10,
+                                backgroundColor: 'rgba(0, 0, 0, 0.95)',
+                                color: 'white',
+                                padding: '10px 12px',
+                                borderRadius: '6px',
+                                fontSize: '12px',
+                                pointerEvents: 'none',
+                                zIndex: 1000,
+                                maxWidth: '400px',
+                                maxHeight: '500px',
+                                overflowY: 'auto',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+                                border: '1px solid #333'
+                            }}>
+                                {hoveredEvents.length > 1 ? (
+                                    // Multiple events - group by location, date, and type
+                                    <>
+                                        <div style={{ fontWeight: 'bold', marginBottom: '8px', borderBottom: '1px solid #555', paddingBottom: '4px', fontSize: '13px' }}>
+                                            {hoveredEvents.length} events at this location
+                                        </div>
+                                        {(() => {
+                                            // Group events by place, date, and type
+                                            const groups = {};
+                                            hoveredEvents.forEach(event => {
+                                                const key = `${event.place}|${event.dateStr}|${event.type}`;
+                                                if (!groups[key]) {
+                                                    groups[key] = {
+                                                        place: event.place,
+                                                        date: event.dateStr,
+                                                        type: event.type,
+                                                        people: []
+                                                    };
+                                                }
+                                                groups[key].people.push(event);
+                                            });
+                                            
+                                            return Object.values(groups).map((group, groupIndex) => {
+                                                const eventConfig = getEventType(group.type);
+                                                const isOther = !EVENT_TYPES[group.type];
+                                                
+                                                return (
+                                                    <div key={groupIndex} style={{ 
+                                                        marginBottom: '8px', 
+                                                        paddingBottom: '8px', 
+                                                        borderBottom: groupIndex < Object.keys(groups).length - 1 ? '1px solid #444' : 'none'
+                                                    }}>
+                                                        <div style={{ color: '#aaa', fontSize: '10px', marginBottom: '3px' }}>
+                                                            📍 {group.place}
+                                                        </div>
+                                                        <div style={{ color: eventConfig.color, fontSize: '11px', fontWeight: 'bold', marginBottom: '3px' }}>
+                                                            {group.date} • {eventConfig.icon} {eventConfig.label}{isOther ? ` (${group.type})` : ''}
+                                                        </div>
+                                                        <div style={{ paddingLeft: '8px' }}>
+                                                            {group.people.map((person, personIndex) => (
+                                                                <div key={personIndex} style={{ fontSize: '11px', marginBottom: '2px' }}>
+                                                                    • {person.name} {person.surname}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            });
+                                        })()}
+                                    </>
+                                ) : (
+                                    // Single event - expanded format
+                                    (() => {
+                                        const event = hoveredEvents[0];
+                                        const eventConfig = getEventType(event.type);
+                                        const isOther = !EVENT_TYPES[event.type];
+                                        
+                                        return (
+                                            <div>
+                                                <div style={{ fontWeight: 'bold', marginBottom: '4px', fontSize: '14px' }}>
+                                                    {event.name} {event.surname}
+                                                </div>
+                                                <div style={{ color: eventConfig.color, marginBottom: '2px' }}>
+                                                    {eventConfig.icon} {eventConfig.label}{isOther ? ` (${event.type})` : ''}: {event.dateStr}
+                                                </div>
+                                                <div style={{ color: '#aaa', fontSize: '12px' }}>📍 {event.place}</div>
+                                            </div>
+                                        );
+                                    })()
+                                )}
+                            </div>
+                        )}
+                        
+                        {/* Legend with Event Type Filters */}
+                        <div style={{
+                            position: 'absolute',
+                            top: '10px',
+                            right: '10px',
+                            backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                            color: 'white',
+                            padding: '12px',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            zIndex: 100,
+                            minWidth: '150px'
+                        }}>
+                            <div style={{ marginBottom: '8px', fontWeight: 'bold', fontSize: '13px' }}>Filter by Event Type</div>
+                            {Object.keys(EVENT_TYPES).map(typeKey => {
+                                const typeConfig = EVENT_TYPES[typeKey];
+                                return (
+                                    <label key={typeKey} style={{ 
+                                        display: 'flex', 
+                                        alignItems: 'center', 
+                                        gap: '6px', 
+                                        marginBottom: '5px',
+                                        cursor: 'pointer',
+                                        padding: '3px',
+                                        borderRadius: '3px',
+                                        backgroundColor: selectedEventTypes.includes(typeKey) ? 'rgba(255,255,255,0.1)' : 'transparent'
+                                    }}>
+                                        <input 
+                                            type="checkbox"
+                                            checked={selectedEventTypes.includes(typeKey)}
+                                            onChange={() => {
+                                                setSelectedEventTypes(prev => 
+                                                    prev.includes(typeKey) 
+                                                        ? prev.filter(t => t !== typeKey)
+                                                        : [...prev, typeKey]
+                                                );
+                                            }}
+                                            style={{ cursor: 'pointer' }}
+                                        />
+                                        <div style={{ width: '10px', height: '10px', borderRadius: '50%', backgroundColor: typeConfig.color, border: '1px solid white' }}></div>
+                                        <span>{typeConfig.icon} {typeConfig.label}</span>
+                                    </label>
+                                );
+                            })}
+                            <button 
+                                onClick={() => setSelectedEventTypes(Object.keys(EVENT_TYPES))}
+                                style={{
+                                    marginTop: '8px',
+                                    width: '100%',
+                                    padding: '4px',
+                                    backgroundColor: '#4CAF50',
+                                    color: 'white',
+                                    border: 'none',
+                                    borderRadius: '3px',
+                                    cursor: 'pointer',
+                                    fontSize: '11px'
+                                }}
+                            >
+                                Select All
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Controls Panel */}
+                    <div style={{ 
+                        minHeight: '240px',
+                        maxHeight: '40vh',
+                        backgroundColor: '#2c2c2c', 
+                        color: 'white', 
+                        padding: '20px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '15px',
+                        boxShadow: '0 -2px 10px rgba(0,0,0,0.3)',
+                        flexShrink: 0,
+                        overflowY: 'auto'
+                    }}>
+                        {/* Date Slider and Display Mode */}
+                        <div style={{ display: 'flex', gap: '15px' }}>
+                            {/* Left side - Date Slider */}
+                            <div style={{ flex: 1 }}>
+                                <div style={{ marginBottom: '8px', fontSize: '18px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span>📅 {currentDate && !isNaN(currentDate.getTime()) ? currentDate.toLocaleDateString() : 'Loading...'}</span>
+                                    <span style={{ fontSize: '12px', color: '#aaa' }}>
+                                        {dateRange.min.getFullYear()} - {dateRange.max.getFullYear()}
+                                    </span>
+                                </div>
+                                <input 
+                                    type="range"
+                                    min={dateRange.min.getTime()}
+                                    max={dateRange.max.getTime()}
+                                    value={currentDate ? currentDate.getTime() : dateRange.max.getTime()}
+                                    onChange={(e) => {
+                                        const timestamp = parseInt(e.target.value);
+                                        const newDate = new Date(timestamp);
+                                        console.log('Slider changed:', timestamp, '->', newDate.toLocaleDateString());
+                                        setCurrentDate(newDate);
+                                    }}
+                                    style={{ 
+                                        width: '100%',
+                                        height: '6px',
+                                        cursor: 'pointer'
+                                    }}
+                                />
+                            </div>
+                            
+                            {/* Right side - Display Mode Buttons */}
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: '160px' }}>
+                                <span style={{ fontSize: '12px', color: '#aaa' }}>Display Mode:</span>
+                                <div style={{ display: 'flex', gap: '6px' }}>
+                                    <button
+                                        onClick={() => setDisplayMode('cumulative')}
+                                        style={{
+                                            flex: 1,
+                                            padding: '6px 12px',
+                                            backgroundColor: displayMode === 'cumulative' ? '#4CAF50' : '#3c3c3c',
+                                            color: 'white',
+                                            border: displayMode === 'cumulative' ? '2px solid #66bb6a' : '2px solid #555',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '11px',
+                                            fontWeight: displayMode === 'cumulative' ? 'bold' : 'normal',
+                                            transition: 'all 0.2s'
+                                        }}
+                                    >
+                                        📚 All
+                                    </button>
+                                    <button
+                                        onClick={() => setDisplayMode('timeline')}
+                                        style={{
+                                            flex: 1,
+                                            padding: '6px 12px',
+                                            backgroundColor: displayMode === 'timeline' ? '#4CAF50' : '#3c3c3c',
+                                            color: 'white',
+                                            border: displayMode === 'timeline' ? '2px solid #66bb6a' : '2px solid #555',
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '11px',
+                                            fontWeight: displayMode === 'timeline' ? 'bold' : 'normal',
+                                            transition: 'all 0.2s'
+                                        }}
+                                    >
+                                        ⏱️ Timeline
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Surname Filter */}
+                        <div style={{ display: 'flex', gap: '15px', alignItems: 'flex-start' }}>
+                            <div style={{ flex: 1, position: 'relative' }} className="surname-dropdown-container">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', gap: '10px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+                                        <span style={{ fontWeight: 'bold', whiteSpace: 'nowrap' }}>👨‍👩‍👧‍👦 Filter by Surname</span>
+                                        {selectedSurnames.length > 0 && (
+                                            <div style={{ 
+                                                fontSize: '11px',
+                                                color: '#aaa',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap'
+                                            }}>
+                                                ({selectedSurnames.join(', ')})
+                                            </div>
+                                        )}
+                                    </div>
+                                    {selectedSurnames.length > 0 && (
+                                        <button 
+                                            onClick={() => setSelectedSurnames([])}
+                                            style={{
+                                                padding: '4px 8px',
+                                                backgroundColor: '#F44336',
+                                                color: 'white',
+                                                border: 'none',
+                                                borderRadius: '3px',
+                                                cursor: 'pointer',
+                                                fontSize: '11px',
+                                                fontWeight: 'bold',
+                                                whiteSpace: 'nowrap'
+                                            }}
+                                        >
+                                            Clear ({selectedSurnames.length})
+                                        </button>
+                                    )}
+                                </div>
+                                
+                                {/* Combined search/dropdown field */}
+                                <input 
+                                    ref={dropdownButtonRef}
+                                    type="text"
+                                    placeholder={selectedSurnames.length > 0 ? `${selectedSurnames.length} selected - search to add more...` : "Search surnames..."}
+                                    value={searchTerm}
+                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                    onFocus={() => setSurnameDropdownOpen(true)}
+                                    style={{
+                                        width: '100%',
+                                        padding: '8px 12px',
+                                        backgroundColor: '#3c3c3c',
+                                        color: 'white',
+                                        border: '1px solid #555',
+                                        borderRadius: '4px',
+                                        fontSize: '14px'
+                                    }}
+                                />
+                                
+                                {/* Dropdown content */}
+                                {surnameDropdownOpen && dropdownButtonRef.current && (
+                                    <div style={{
+                                        position: 'fixed',
+                                        top: dropdownButtonRef.current.getBoundingClientRect().bottom + 4,
+                                        left: dropdownButtonRef.current.getBoundingClientRect().left,
+                                        width: dropdownButtonRef.current.getBoundingClientRect().width,
+                                        bottom: '20px',
+                                        backgroundColor: '#2c2c2c',
+                                        border: '1px solid #555',
+                                        borderRadius: '4px',
+                                        zIndex: 1000,
+                                        overflowY: 'auto',
+                                        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+                                    }}>
+                                        {/* Surnames list */}
+                                        <div style={{ padding: '4px' }}>
+                                            {filteredSurnames.length === 0 && searchTerm && (
+                                                <div style={{ color: '#888', fontSize: '12px', padding: '8px' }}>
+                                                    No surnames found
+                                                </div>
+                                            )}
+                                            {filteredSurnames.length === 0 && !searchTerm && (
+                                                <div style={{ color: '#888', fontSize: '12px', padding: '8px' }}>
+                                                    Start typing to search surnames...
+                                                </div>
+                                            )}
+                                            {filteredSurnames.map(surname => (
+                                                <label key={surname} style={{ 
+                                                    display: 'flex', 
+                                                    alignItems: 'center', 
+                                                    gap: '8px',
+                                                    cursor: 'pointer',
+                                                    fontSize: '13px',
+                                                    padding: '6px 8px',
+                                                    borderRadius: '3px',
+                                                    backgroundColor: selectedSurnames.includes(surname) ? 'rgba(76, 175, 80, 0.2)' : 'transparent',
+                                                    transition: 'background-color 0.2s'
+                                                }}
+                                                onMouseEnter={(e) => e.currentTarget.style.backgroundColor = selectedSurnames.includes(surname) ? 'rgba(76, 175, 80, 0.3)' : 'rgba(255,255,255,0.1)'}
+                                                onMouseLeave={(e) => e.currentTarget.style.backgroundColor = selectedSurnames.includes(surname) ? 'rgba(76, 175, 80, 0.2)' : 'transparent'}
+                                                >
+                                                    <input 
+                                                        type="checkbox"
+                                                        checked={selectedSurnames.includes(surname)}
+                                                        onChange={() => toggleSurname(surname)}
+                                                        style={{ cursor: 'pointer' }}
+                                                    />
+                                                    <span>{surname}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            {/* Stats Panel */}
+                            <div style={{ 
+                                minWidth: '180px',
+                                backgroundColor: '#3c3c3c',
+                                padding: '12px',
+                                borderRadius: '4px',
+                                fontSize: '13px'
+                            }}>
+                                <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>📊 Statistics</div>
+                                <div style={{ marginBottom: '4px' }}>
+                                    Total Events: <strong>{events.length}</strong>
+                                </div>
+                                <div style={{ marginBottom: '4px' }}>
+                                    Surnames Selected: <strong>{selectedSurnames.length}</strong>
+                                </div>
+                                <div style={{ marginBottom: '4px' }}>
+                                    Events Shown: <strong>{visibleEventCount}</strong>
+                                </div>
+                                <div style={{ marginBottom: '10px', fontSize: '11px', color: '#aaa' }}>
+                                    Date: {currentDate ? currentDate.toLocaleDateString() : 'Not set'}
+                                </div>
+                                <button 
+                                    onClick={() => {
+                                        console.log('Manual draw triggered');
+                                        console.log('Current date:', currentDate);
+                                        console.log('Events:', events.length);
+                                        console.log('Map:', map.current);
+                                        console.log('Canvas:', canvasRef.current);
+                                        drawCanvas();
+                                    }}
+                                    style={{
+                                        width: '100%',
+                                        padding: '6px 12px',
+                                        backgroundColor: '#2196F3',
+                                        color: 'white',
+                                        border: 'none',
+                                        borderRadius: '4px',
+                                        cursor: 'pointer',
+                                        fontSize: '12px',
+                                        fontWeight: 'bold',
+                                        marginBottom: '6px'
+                                    }}
+                                >
+                                    Redraw Map
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<FamilyTreeMap />);
+    </script>
+</body>
+</html>

@@ -191,7 +191,7 @@ Then open: `http://localhost:8000/family-tree-map-canvas.html`
 - Some locations may not be found in OpenStreetMap database
 - Check console output for list of failed locations
 - You can manually add coordinates to CSV file if needed
-- Common issues: Typos, old addresses, renamed locations
+- Common issues: Typos, old addresses, renamed locations, addresses that no longer exist
 
 **Performance issues:**
 - Large datasets (10,000+ events) may be slow
@@ -245,16 +245,6 @@ Replace `'mapbox://styles/mapbox/dark-v11'` with other Mapbox styles:
 - Browser storage not supported (data loads from CSV each time)
 - Large datasets (20,000+ events) may have performance issues
 
-## Future Enhancements
-
-Potential improvements for future versions:
-- Manual geocoding correction interface
-- Export filtered data to new CSV
-- Photo/document attachments to events
-- Family relationship lines on map
-- Heatmap view
-- 3D terrain visualization
-
 ## Credits
 
 - **Mapbox GL JS**: Map rendering
@@ -275,5 +265,3 @@ For issues or questions:
 4. Check that Mapbox token is valid
 
 ---
-
-**Happy Family Tree Mapping! 🌳🗺️**

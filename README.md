@@ -2,7 +2,7 @@
 
 An interactive web application for visualizing family tree events (births, deaths, marriages, migrations) on a geographic map over time. Built with React, Mapbox GL JS, and Python.
 
-![Family Tree Map Demo](screenshot.png)
+<img width="1490" height="805" alt="Screen Shot 2026-03-10 at 8 41 22 PM" src="https://github.com/user-attachments/assets/574b0c2e-bc2b-41ef-8527-d18a30ee7184" />
 
 ## Why I Built This
 
